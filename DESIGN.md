@@ -62,234 +62,23 @@ com.messageplatform
 
 ---
 
-## Class Diagram (Updated)
-
-```mermaid
-classDiagram
-    direction TB
-
-    class Message {
-        +String id
-        +String senderId
-        +String senderName
-        +String channelId
-        +String content
-        +Instant timestamp
-        +Map~String,String~ metadata
-        +List~Attachment~ attachments
-        +MessageBuilder builder()
-    }
-
-    class Attachment {
-        +String url
-        +String filename
-        +String mimeType
-        +long size
-    }
-
-    class Channel {
-        +String id
-        +String name
-        +String type
-        +String platform
-    }
-
-    class MessagePlatform {
-        <<abstract>>
-        #PlatformConfig config
-        #HttpClient httpClient
-        #ResiliencePolicy resilience
-        #MetricsCollector metrics
-        +connect() void
-        +disconnect() void
-        +isConnected() boolean
-        +send(Message) String
-        +sendAsync(Message) CompletableFuture~String~
-        +fetchMessages(String, int) List~Message~
-        +fetchMessagesAsync(String, int) CompletableFuture~List~Message~~
-        +listChannels() List~Channel~
-        +getChannel(String) Channel
-        +onMessageReceived(MessageHandler) void
-        +getPlatformName() String
-        +configure(PlatformConfig) void
-    }
-
-    class MessageHandler {
-        <<interface>>
-        +onMessage(Message) void
-    }
-
-    class PlatformConfig {
-        +String platform
-        +Map~String,String~ credentials
-        +boolean enabled
-        +UriConfigParser parse(String uri)
-    }
-
-    class RetryPolicy {
-        +int maxAttempts
-        +Duration delay
-        +BackoffStrategy strategy
-    }
-
-    class CircuitBreaker {
-        +int failureThreshold
-        +Duration resetTimeout
-        +State state
-    }
-
-    class PlatformMetrics {
-        +Counter messagesSent
-        +Counter messagesFailed
-        +Timer latency
-        +register(MeterRegistry) void
-    }
-
-    class MessageBuilder {
-        +withTitle(String)
-        +withBody(String)
-        +withColor(String)
-        +withButton(String, String)
-        +withAttachment(Attachment)
-        +build() Message
-    }
-
-    class PlatformFactory {
-        +create(String, PlatformConfig) MessagePlatform
-    }
-
-    class MessageRouter {
-        -Map~String,MessagePlatform~ platforms
-        +registerPlatform(MessagePlatform) void
-        +getPlatform(String) MessagePlatform
-        +route(Message, String, String) void
-    }
-
-    MessagePlatform <|-- SlackPlatform
-    MessagePlatform <|-- TeamsPlatform
-    MessagePlatform <|-- DiscordPlatform
-    MessagePlatform <|-- GoogleChatPlatform
-    MessagePlatform <|-- TelegramPlatform
-    MessagePlatform <|-- WhatsAppPlatform
-    MessagePlatform <|-- MatrixPlatform
-    MessagePlatform ..> RetryPolicy : uses
-    MessagePlatform ..> CircuitBreaker : uses
-    MessagePlatform ..> PlatformMetrics : uses
-    MessagePlatform ..> MessageBuilder : uses
-    MessageRouter o-- MessagePlatform : manages
-    PlatformFactory ..> MessagePlatform : creates
-```
-
----
-
 ## Core Classes — Detailed Design
 
 ### 1. `Message` & `MessageBuilder` (core / formatting)
 
-The unified message model now includes a fluent builder to handle platform-specific rich formatting automatically.
-
-**Fields:** Same as v1 (`id`, `senderId`, `content`, etc.) + `formatType` (TEXT, MARKDOWN, CARD, EMBED).
-
-**Methods:**
-- `static MessageBuilder of(String channelId)` — starts builder chain
-- `withTitle(String)`, `withBody(String)`, `withColor(String)` — for card/embed payloads
-- `withButton(String label, String url)` — adds action buttons (renders as Block Kit/Adaptive Cards automatically)
-- `withAttachment(Attachment)` — handles multipart uploads
-- `build()` — returns immutable `Message` ready for transport
-
-**Markdown Translation:** `MarkdownTranslator` normalizes input to platform-native syntax (e.g., Discord `**bold**` → Slack `*bold*`, Teams `<b>bold</b>`).
-
----
+The unified message model includes a fluent builder to handle platform-specific rich formatting automatically. The `Message` class holds immutable fields for ID, sender details, channel target, content, timestamp, metadata, and attachments. It also tracks the intended format type (TEXT, MARKDOWN, CARD, EMBED). The `MessageBuilder` provides chainable methods (`withTitle`, `withBody`, `withColor`, `withButton`, `withAttachment`) that construct the payload and return a ready-to-send `Message`. A separate `MarkdownTranslator` normalizes input syntax to platform-native formatting rules.
 
 ### 2. `PlatformConfig` & URI Parsing (core / config)
 
-Replaces the raw `Map` with structured parsing and validation.
+Replaces raw configuration maps with structured parsing and validation. The `PlatformConfig` class stores the target platform name, a map of credentials, and an enabled flag. It exposes a static factory method `fromUri(String)` that parses standardized URI strings into valid configurations. Supported URIs follow the pattern `platform://credential1/credential2?optional_param=value`. A companion `PlatformCredentials` class handles secure storage and validation of tokens, secrets, and endpoints per platform.
 
-```java
-public class PlatformConfig {
-    private final String platform;
-    private final Map<String, String> credentials = new HashMap<>();
-    private boolean enabled = true;
-    
-    // URI syntax: platform://credential1/credential2?optional_param=value
-    public static PlatformConfig fromUri(String uri) { ... }
-}
-```
+### 3. `MessagePlatform` (core) — Abstract Parent Class
 
-Supported URIs:
-- `slack://xoxb-bot-token/C012AB3CD`
-- `discord://webhook-id/webhook-token`
-- `teams://tenant-id/client-id/client-secret`
-- `telegram://bot-token/chat-id`
-- `whatsapp://twilio-sid/auth-token/phone-number`
-
----
-
-### 3. `MessagePlatform` (core) — **Abstract Parent Class**
-
-Updated to enforce resilience, async support, and observability.
-
-```java
-public abstract class MessagePlatform {
-
-    protected PlatformConfig config;
-    protected final HttpClient httpClient; // java.net.http.HttpClient with pooling
-    protected final RetryPolicy retryPolicy;
-    protected final CircuitBreaker circuitBreaker;
-    protected final PlatformMetrics metrics;
-
-    // ─── Lifecycle ───────────────────────────────────────────────
-    public abstract void connect() throws PlatformException;
-    public abstract void disconnect();
-    public abstract boolean isConnected();
-
-    // ─── Sending (Sync & Async) ──────────────────────────────────
-    public abstract String send(Message message) throws PlatformException;
-    
-    public CompletableFuture<String> sendAsync(Message message) {
-        return CompletableFuture.supplyAsync(() -> send(message))
-                .exceptionally(ex -> throw new CompletionException(resilience.wrap(ex)));
-    }
-
-    // ─── Receiving / Fetching ────────────────────────────────────
-    public abstract List<Message> fetchMessages(String channelId, int limit) throws PlatformException;
-    public CompletableFuture<List<Message>> fetchMessagesAsync(String channelId, int limit) { ... }
-
-    // ─── Channel Management ──────────────────────────────────────
-    public abstract List<Channel> listChannels() throws PlatformException;
-    public abstract Channel getChannel(String channelId) throws PlatformException;
-
-    // ─── Event Handling ──────────────────────────────────────────
-    public abstract void onMessageReceived(MessageHandler handler);
-
-    // ─── Configuration & Resilience ──────────────────────────────
-    public void configure(PlatformConfig config) { this.config = config; }
-    public void setRetryPolicy(RetryPolicy policy) { this.retryPolicy = policy; }
-    public void setCircuitBreaker(CircuitBreaker cb) { this.circuitBreaker = cb; }
-    
-    // ─── Observability ───────────────────────────────────────────
-    public void registerMetrics(MeterRegistry registry) { metrics.register(registry); }
-    public abstract String getPlatformName();
-}
-```
-
-**Design notes:**
-- `connect()` initializes the native `HttpClient` with connection pooling, timeout settings, and platform-specific auth headers.
-- All network calls route through a resilience wrapper that handles HTTP 429 (reads `Retry-After`), exponential backoff for 5xx, and circuit breaking on consecutive failures.
-- Metrics are automatically incremented per call using Micrometer.
-
----
+This abstract class defines the contract for all messaging adapters. It holds references to the resolved configuration, a native HTTP client instance, resilience policies, and metrics collectors. It enforces lifecycle methods (`connect`, `disconnect`, `isConnected`), sending operations (`send`, `sendAsync`), message retrieval (`fetchMessages`, `fetchMessagesAsync`), channel management (`listChannels`, `getChannel`), event subscription (`onMessageReceived`), and platform identification (`getPlatformName`). Configuration, resilience tuning, and metrics registration are handled via dedicated setters. All network calls route through a resilience wrapper that handles HTTP 429 headers, exponential backoff for 5xx errors, and circuit breaking on consecutive failures. Metrics are automatically incremented per call using Micrometer.
 
 ### 4. `MessageHandler` (core) — Interface
 
-Unchanged. Simple callback for push-based delivery.
-
-```java
-@FunctionalInterface
-public interface MessageHandler {
-    void onMessage(Message message);
-}
-```
+A simple functional interface used for push-based delivery. It defines a single method `onMessage(Message)` that is invoked when the platform adapter receives an incoming event or webhook payload.
 
 ---
 
@@ -343,75 +132,26 @@ Each adapter extends `MessagePlatform` and handles platform-specific HTTP/WebSoc
 
 ### `MessageRouter`
 
-Unchanged in concept, but now supports async routing and resilience fallbacks.
-
-```java
-public class MessageRouter {
-    private final Map<String, MessagePlatform> platforms = new ConcurrentHashMap<>();
-
-    public void registerPlatform(MessagePlatform platform) { ... }
-    public MessagePlatform getPlatform(String name) { ... }
-    
-    public CompletableFuture<Void> route(Message message, String targetPlatform, String targetChannel) {
-        return getPlatform(targetPlatform).sendAsync(message)
-                .thenAccept(msgId -> log.info("Routed to {}", msgId))
-                .exceptionally(ex -> { /* fallback or alert */ null; });
-    }
-}
-```
+Manages a registry of active platform instances and routes messages to the correct adapter. It supports async routing with built-in resilience fallbacks. The router holds a concurrent map of platform names to their respective `MessagePlatform` implementations, provides registration and lookup methods, and exposes a `route` method that delegates to the target platform's async send operation while capturing success/failure outcomes.
 
 ### `PlatformFactory`
 
-Updated to support URI parsing and platform expansion.
-
-```java
-public class PlatformFactory {
-    public MessagePlatform create(String platformName, PlatformConfig config) {
-        return switch (platformName.toLowerCase()) {
-            case "slack"   -> new SlackPlatform(config);
-            case "teams"   -> new TeamsPlatform(config);
-            case "discord" -> new DiscordPlatform(config);
-            case "googlechat" -> new GoogleChatPlatform(config);
-            case "telegram" -> new TelegramPlatform(config);
-            case "whatsapp" -> new WhatsAppPlatform(config);
-            case "matrix"  -> new MatrixPlatform(config);
-            default -> throw new IllegalArgumentException("Unknown platform: " + platformName);
-        };
-    }
-}
-```
+Responsible for instantiating platform adapters based on configuration. It maps platform identifiers (e.g., "slack", "discord") to their concrete implementations using a switch expression. It validates configurations before instantiation and throws descriptive exceptions for unsupported platforms or malformed credentials.
 
 ---
 
-## Usage Example (Updated)
+## Nice-to-Have Features & Production Readiness
 
-```java
-// 1. URI-based configuration & factory
-PlatformConfig slackConfig = PlatformConfig.fromUri("slack://xoxb-xxx/C012AB3CD");
-MessagePlatform slack = PlatformFactory.create("slack", slackConfig);
-slack.connect();
+To ensure the framework is fully production-ready and gives companies complete control over messaging platforms, the following features should be considered for future iterations or as optional modules:
 
-// 2. Resilience & Observability setup
-slack.setRetryPolicy(RetryPolicy.exponentialBackoff(3, Duration.ofMillis(500)));
-slack.registerMetrics(new MeterRegistry()); // Micrometer
-
-// 3. Async send with builder
-Message msg = MessageBuilder.of("#general")
-    .withTitle("Deployment Alert")
-    .withBody("✅ Service `auth-api` deployed successfully.")
-    .withColor("green")
-    .withButton("View Logs", "https://logs.internal/auth-api/123")
-    .build();
-
-CompletableFuture<String> future = slack.sendAsync(msg);
-future.thenAccept(id -> System.out.println("Sent: " + id))
-      .exceptionally(ex -> { System.err.println("Failed: " + ex.getMessage()); return null; });
-
-// 4. Multi-platform routing
-MessageRouter router = new MessageRouter();
-router.registerPlatform(slack);
-router.route(msg, "slack", "#general");
-```
+- **Advanced Authentication Management** — Support for OAuth2 flows, token refresh mechanisms, certificate-based auth, and secure credential storage (e.g., HashiCorp Vault integration).
+- **Comprehensive Channel Management** — APIs to create, archive, rename, list, and manage permissions for channels/groups across all supported platforms. Includes webhook registration and bot installation wizards.
+- **Message History & Sync** — Bidirectional sync capabilities, message archival, search functionality, and pagination support for retrieving historical conversations.
+- **Rich Media & File Handling** — Secure upload/download pipelines, virus scanning hooks, format conversion, and CDN integration for large attachments.
+- **Multi-Tenant & Workspace Isolation** — Built-in support for managing multiple organizations/workspaces with isolated configurations, rate limits, and metrics.
+- **Scheduled & Batch Messaging** — Delayed execution queues, cron-like scheduling, and batch processing with delivery receipts and audit logs.
+- **Webhook & Event Management** — Centralized webhook registration, signature verification, retry policies for event delivery, and event routing/filtering.
+- **Configuration Validation & Hot-Reloading** — Runtime validation of platform configs, dynamic updates without service restarts, and drift detection.
 
 ---
 
@@ -422,3 +162,10 @@ router.route(msg, "slack", "#general");
 - **Scheduled/Delayed Messages** — Internal delay queue with platform-aware scheduling
 - **Multi-threaded Event Processing** — Configurable thread pool for `onMessageReceived` handlers
 - **Platform-specific Rich Components** — Sliders, date pickers, multi-select dropdowns (where supported)
+
+- Kafka connect to read or write messages to kafka
+- interactive messages in msteams
+- specific format (templates) and possibility for expansion of them
+- Replies to conversation
+- Emails
+
