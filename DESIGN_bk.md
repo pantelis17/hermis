@@ -16,7 +16,7 @@
 ## Package Structure
 
 ```
-com.messageplatform
+com.hermis
 ├── core/                  # Core abstractions & models
 │   ├── Message.java
 │   ├── Attachment.java
