@@ -41,7 +41,7 @@ public class DiscordPlatform extends MessagePlatform {
     }
 
     @Override
-    public void addMembersToChannel(List<String> users) throws PlatformException {
+    public void addMembersToChannel(List<String> users, String channel) throws PlatformException {
 
     }
 

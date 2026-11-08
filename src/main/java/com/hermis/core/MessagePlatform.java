@@ -39,7 +39,7 @@ public abstract class MessagePlatform {
     public abstract Channel getChannel(String channelId) throws PlatformException;
     protected  abstract  Channel findChannelByName(String name) throws PlatformException;
     public abstract Channel createChannel(String name, boolean isPrivate) throws PlatformException;
-    public abstract void addMembersToChannel(List<String> users) throws PlatformException;
+    public abstract void addMembersToChannel(List<String> users, String channel) throws PlatformException;
 
     public abstract void onMessageReceived(MessageHandler handler);
 

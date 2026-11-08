@@ -21,7 +21,9 @@ public class InitTest {
         if (slack.isConnected()) {
             System.out.println("yes i am here");
             final var msg = Message.of("random").withContent(":wave: Hello from my Java application!").build();
-            slack.send(msg, "general");
+            slack.send(msg, "mytest5");
+
+            slack.createChannel("mytest5", false);
         }
 
     }

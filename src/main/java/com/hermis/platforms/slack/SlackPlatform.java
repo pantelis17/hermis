@@ -102,6 +102,7 @@ public class SlackPlatform extends MessagePlatform {
     protected Channel findChannelByName(String name) throws PlatformException {
         Optional<Conversation> conversationOptional;
         try {
+            // TODO: Check with slack if we can have more that one channel with the same name (especially if the channel is private)
             final var response = methods.conversationsList(req -> req.excludeArchived(true).types(List.of(ConversationType.PUBLIC_CHANNEL, ConversationType.PRIVATE_CHANNEL)));
             conversationOptional = response.getChannels().stream().filter(c -> c.getNameNormalized().equals(name)).findFirst();
         } catch (IOException | SlackApiException e) {
@@ -117,12 +118,46 @@ public class SlackPlatform extends MessagePlatform {
 
     @Override
     public Channel createChannel(String name, boolean isPrivate) throws PlatformException {
-        return null;
+        Channel existingChannel = null;
+        try {
+            existingChannel = findChannelByName(name);
+        } catch (Exception ex) {
+            //TODO: An exception does not always mean that the channel does not exists
+            System.out.printf("Channel '%s' does not exists, start it's creation%n", name);
+        }
+
+        if (existingChannel != null) {
+            throw new PlatformException("Channel '%s' already exists".formatted(name));
+        }
+
+        try {
+            // TODO: Add method to ensure compatible name for the channel (lower case and no special characters https://community.make.com/t/slack-creating-new-channel-error-invalid-name-specials-200/22355)
+            final var response = methods.conversationsCreate(req -> req.isPrivate(isPrivate).name(name));
+            // TODO: Handle error code
+            if (response.isOk()) {
+                final var channel = response.getChannel();
+                addMembersToChannel(List.of("pantelis.ierissos@gmail.com"), channel.getNameNormalized());
+                return new Channel(channel.getId(), channel.getNameNormalized(), channel.isPrivate() ? ChannelTypeE.PRIVATE.getType() : ChannelTypeE.PUBLIC.getType(), PlatformTypeE.SLACK.getType());
+            } else {
+                throw new PlatformException("Creation of channel '%s' failed: %s".formatted(name, response.getError()));
+            }
+        } catch (SlackApiException | IOException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Override
-    public void addMembersToChannel(List<String> users) throws PlatformException {
-
+    public void addMembersToChannel(List<String> users, String channel) throws PlatformException {
+        try {
+            // TODO: Add logic to be able to filter by email, name , profile etc
+           final var selected = methods.usersList( req -> req).getMembers().stream().filter(u -> users.contains(u.getName()) || users.contains(u.getRealName()) || (u.getProfile() != null && u.getProfile().getEmail() != null && users.contains(u.getProfile().getEmail()))).toList();
+           final var actualChannel = findChannelByName(channel);
+           // TODO: We can add max 30 users in one request, break it to multiple requests if we have more than that
+          final var resp = methods.conversationsInvite(req -> req.channel(actualChannel.id()).users(selected.stream().map(u -> u.getId()).toList()));
+          resp.isOk();
+        } catch (IOException | SlackApiException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Override public void onMessageReceived(MessageHandler handler) {  }
